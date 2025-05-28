@@ -1,0 +1,19 @@
+*3
+$3
+SET
+$5
+mykey
+$17
+Hello, MiniRedis!
+*3
+$6
+EXPIRE
+$5
+mykey
+$2
+10
+*2
+$3
+DEL
+$5
+mykey
