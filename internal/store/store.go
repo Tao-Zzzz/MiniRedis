@@ -5,6 +5,9 @@ import (
 	"os"
 	"sync"
 	"time"
+	"MiniRedis/internal/protocol"
+	"strconv"
+	"bufio"
 )
 
 // Store 代表键值存储
@@ -31,35 +34,45 @@ type Command struct {
 	Args []string
 }
 
-// NewStore 创建一个新的存储实例
+// NewStore 创建存储实例
 func NewStore() *Store {
-	f, err := os.OpenFile("miniredis.aof", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		fmt.Printf("Warning: failed to open AOF file: %v\n", err)
-	}
-	s := &Store{
-		data:         make(map[string]string),
-		lists:        make(map[string][]string),
-		expire:       make(map[string]time.Time),
-		accessTime:   make(map[string]time.Time),
-		transactions: make(map[string][]Command),
-		maxMemory:    1024 * 1024 * 10, // 10MB
-		aof:          f,
-	}
-	// 加载RDB快照
-	data, lists, expire, err := LoadRDB("miniredis.rdb")
-	if err == nil {
-		s.data = data
-		s.lists = lists
-		s.expire = expire
-		fmt.Println("Loaded RDB snapshot")
-	} else if !os.IsNotExist(err) {
-		fmt.Printf("Warning: failed to load RDB: %v\n", err)
-	}
-	// 启动定期快照和过期检查
-	go s.startSnapshotting()
-	go s.startExpirationCheck()
-	return s
+    // 打开AOF文件
+    f, err := os.OpenFile("miniredis.aof", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        fmt.Printf("Warning: failed to open AOF file: %v\n", err)
+    }
+
+    s := &Store{
+        data:         make(map[string]string),
+        lists:        make(map[string][]string),
+        expire:       make(map[string]time.Time),
+        accessTime:   make(map[string]time.Time),
+        transactions: make(map[string][]Command),
+        maxMemory:    1024 * 1024 * 10, // 10MB
+        aof:          f,
+    }
+
+    // 优先加载AOF
+    if err := s.LoadAOF("miniredis.aof"); err == nil {
+        fmt.Println("Loaded AOF log")
+    } else if !os.IsNotExist(err) {
+        fmt.Printf("Warning: failed to load AOF: %v\n", err)
+        // 如果AOF不存在，尝试加载RDB
+        data, lists, expire, err := LoadRDB("miniredis.rdb")
+        if err == nil {
+            s.data = data
+            s.lists = lists
+            s.expire = expire
+            fmt.Println("Loaded RDB snapshot")
+        } else if !os.IsNotExist(err) {
+            fmt.Printf("Warning: failed to load RDB: %v\n", err)
+        }
+    }
+
+    // 启动快照和过期检查
+    go s.startSnapshotting()
+    go s.startExpirationCheck()
+    return s
 }
 
 // SetPubSub 设置发布接口
@@ -69,12 +82,15 @@ func (s *Store) SetPubSub(ps PubSub) {
 	s.pubsub = ps
 }
 
-// Set 设置键值对，可选设置过期时间（秒）
+// Set 设置键值对
 func (s *Store) Set(clientID, key, value string, expireSeconds int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if tx := s.getTransaction(clientID); tx != nil {
+		//fmt.Printf("tx for client %s already exists, adding SET command to transaction: %s=%s\n", clientID, key, value)
+		// fmt.Printf("Adding SET command to transaction for client %s: %s=%s\n", clientID, key, value)
+		// fmt.Printf("重新添加进去了???")
 		tx = append(tx, Command{Name: "SET", Args: []string{key, value}})
 		if expireSeconds > 0 {
 			tx = append(tx, Command{Name: "EXPIRE", Args: []string{key, fmt.Sprintf("%d", expireSeconds)}})
@@ -83,6 +99,7 @@ func (s *Store) Set(clientID, key, value string, expireSeconds int) {
 		return
 	}
 
+	//fmt.Printf("应该走这里才对Setting key %s to %s with expire %d seconds\n", key, value, expireSeconds)
 	s.checkMemory()
 	s.data[key] = value
 	s.accessTime[key] = time.Now()
@@ -92,7 +109,6 @@ func (s *Store) Set(clientID, key, value string, expireSeconds int) {
 		delete(s.expire, key)
 	}
 
-	// 写入AOF日志
 	if s.aof != nil {
 		cmd := fmt.Sprintf("*3\r\n$3\r\nSET\r\n$%d\r\n%s\r\n$%d\r\n%s\r\n", len(key), key, len(value), value)
 		if expireSeconds > 0 {
@@ -132,7 +148,7 @@ func (s *Store) Get(clientID, key string) (string, bool) {
 	return value, exists
 }
 
-// Delete 删除一个或多个键
+// Delete 删除键
 func (s *Store) Delete(clientID string, keys ...string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -168,7 +184,7 @@ func (s *Store) Delete(clientID string, keys ...string) int {
 	return count
 }
 
-// Exists 检查一个或多个键是否存在
+// Exists 检查键是否存在
 func (s *Store) Exists(clientID string, keys ...string) int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -198,7 +214,7 @@ func (s *Store) Exists(clientID string, keys ...string) int {
 	return count
 }
 
-// Expire 设置键的过期时间
+// Expire 设置过期时间
 func (s *Store) Expire(clientID, key string, seconds int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -220,8 +236,7 @@ func (s *Store) Expire(clientID, key string, seconds int) bool {
 	}
 	return true
 }
-
-// LPush 向列表左侧插入元素
+// LPush 向列表左侧插入
 func (s *Store) LPush(clientID, key string, values ...string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -230,6 +245,11 @@ func (s *Store) LPush(clientID, key string, values ...string) int {
 		tx = append(tx, Command{Name: "LPUSH", Args: append([]string{key}, values...)})
 		s.transactions[clientID] = tx
 		return 0
+	}
+
+	// 翻转 values，使左边的参数先进入列表
+	for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+		values[i], values[j] = values[j], values[i]
 	}
 
 	list, exists := s.lists[key]
@@ -248,7 +268,7 @@ func (s *Store) LPush(clientID, key string, values ...string) int {
 	return len(list)
 }
 
-// RPush 向列表右侧插入元素
+// RPush 向列表右侧插入
 func (s *Store) RPush(clientID, key string, values ...string) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,7 +295,7 @@ func (s *Store) RPush(clientID, key string, values ...string) int {
 	return len(list)
 }
 
-// LPop 从列表左侧弹出元素
+// LPop 从列表左侧弹出
 func (s *Store) LPop(clientID, key string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -304,7 +324,7 @@ func (s *Store) LPop(clientID, key string) (string, bool) {
 	return value, true
 }
 
-// RPop 从列表右侧弹出元素
+// RPop 从列表右侧弹出
 func (s *Store) RPop(clientID, key string) (string, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -365,49 +385,71 @@ func (s *Store) BeginTransaction(clientID string) {
 
 // ExecuteTransaction 执行事务
 func (s *Store) ExecuteTransaction(clientID string) []string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+    s.mu.Lock()
+    tx, exists := s.transactions[clientID]
+    if !exists {
+        s.mu.Unlock()
+        return []string{"-ERR no transaction to execute\r\n"}
+    }
+    // 先删除事务队列，防止递归加入
+    delete(s.transactions, clientID)
+    s.mu.Unlock()
+
+    results := make([]string, 0, len(tx))
+    for _, cmd := range tx {
+        fmt.Printf("Executing transaction command: %s %v\n", cmd.Name, cmd.Args)
+        switch cmd.Name {
+        case "SET":
+            s.Set(clientID, cmd.Args[0], cmd.Args[1], 0)
+            //fmt.Printf("Set key %s to %s\n", cmd.Args[0], cmd.Args[1])
+            results = append(results, "+OK\r\n")
+        case "EXPIRE":
+            seconds, _ := time.ParseDuration(cmd.Args[1] + "s")
+            s.Expire(clientID, cmd.Args[0], int(seconds.Seconds()))
+            results = append(results, ":1\r\n")
+        case "DEL":
+            count := s.Delete(clientID, cmd.Args...)
+            results = append(results, fmt.Sprintf(":%d\r\n", count))
+        case "LPUSH":
+            length := s.LPush(clientID, cmd.Args[0], cmd.Args[1:]...)
+            results = append(results, fmt.Sprintf(":%d\r\n", length))
+        case "RPUSH":
+            length := s.RPush(clientID, cmd.Args[0], cmd.Args[1:]...)
+            results = append(results, fmt.Sprintf(":%d\r\n", length))
+        case "LPOP":
+            if value, exists := s.LPop(clientID, cmd.Args[0]); exists {
+                results = append(results, fmt.Sprintf("$%d\r\n%s\r\n", len(value), value))
+            } else {
+                results = append(results, "$-1\r\n")
+            }
+        case "RPOP":
+            if value, exists := s.RPop(clientID, cmd.Args[0]); exists {
+                results = append(results, fmt.Sprintf("$%d\r\n%s\r\n", len(value), value))
+            } else {
+                results = append(results, "$-1\r\n")
+            }
+        }
+    }
+    return results
+}
+
+// GetTransactionCommands 获取事务命令（用于复制）
+func (s *Store) GetTransactionCommands(clientID string) []*protocol.Command {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	tx, exists := s.transactions[clientID]
 	if !exists {
-		return []string{"-ERR no transaction to execute\r\n"}
+		return nil
 	}
-	delete(s.transactions, clientID)
-
-	results := make([]string, 0, len(tx))
-	for _, cmd := range tx {
-		switch cmd.Name {
-		case "SET":
-			s.Set(clientID, cmd.Args[0], cmd.Args[1], 0)
-			results = append(results, "+OK\r\n")
-		case "EXPIRE":
-			seconds, _ := time.ParseDuration(cmd.Args[1] + "s")
-			s.Expire(clientID, cmd.Args[0], int(seconds.Seconds()))
-			results = append(results, ":1\r\n")
-		case "DEL":
-			count := s.Delete(clientID, cmd.Args...)
-			results = append(results, fmt.Sprintf(":%d\r\n", count))
-		case "LPUSH":
-			length := s.LPush(clientID, cmd.Args[0], cmd.Args[1:]...)
-			results = append(results, fmt.Sprintf(":%d\r\n", length))
-		case "RPUSH":
-			length := s.RPush(clientID, cmd.Args[0], cmd.Args[1:]...)
-			results = append(results, fmt.Sprintf(":%d\r\n", length))
-		case "LPOP":
-			if value, exists := s.LPop(clientID, cmd.Args[0]); exists {
-				results = append(results, fmt.Sprintf("$%d\r\n%s\r\n", len(value), value))
-			} else {
-				results = append(results, "$-1\r\n")
-			}
-		case "RPOP":
-			if value, exists := s.RPop(clientID, cmd.Args[0]); exists {
-				results = append(results, fmt.Sprintf("$%d\r\n%s\r\n", len(value), value))
-			} else {
-				results = append(results, "$-1\r\n")
-			}
+	commands := make([]*protocol.Command, len(tx))
+	for i, cmd := range tx {
+		commands[i] = &protocol.Command{
+			Name: cmd.Name,
+			Args: cmd.Args,
 		}
 	}
-	return results
+	return commands
 }
 
 // DiscardTransaction 丢弃事务
@@ -417,12 +459,12 @@ func (s *Store) DiscardTransaction(clientID string) {
 	delete(s.transactions, clientID)
 }
 
-// getTransaction 获取当前事务
+// getTransaction 获取事务
 func (s *Store) getTransaction(clientID string) []Command {
 	return s.transactions[clientID]
 }
 
-// startSnapshotting 定期触发RDB快照
+// startSnapshotting 定期快照
 func (s *Store) startSnapshotting() {
 	ticker := time.NewTicker(60 * time.Second)
 	for range ticker.C {
@@ -432,19 +474,27 @@ func (s *Store) startSnapshotting() {
 	}
 }
 
-// startExpirationCheck 定期检查过期键
+// startExpirationCheck 定期检查过期
 func (s *Store) startExpirationCheck() {
 	ticker := time.NewTicker(time.Second)
 	for range ticker.C {
 		s.mu.Lock()
 		for key, expireTime := range s.expire {
+			// 超过时间检查
 			if time.Now().After(expireTime) {
+				// 删除过期键
 				delete(s.data, key)
 				delete(s.lists, key)
 				delete(s.expire, key)
 				delete(s.accessTime, key)
 				if s.pubsub != nil {
-					s.pubsub.Publish("keyspace", fmt.Sprintf("*3\r\n$7\r\nmessage\r\n$8\r\nkeyspace\r\n$%d\r\nexpired:%s\r\n", len("expired:"+key), "expired:"+key))
+					// 发布原始内容数组，由消息推送处序列化为 RESP
+					msg := protocol.SerializeArray([]string{
+						protocol.SerializeBulkString("message"),
+						protocol.SerializeBulkString("keyspace"),
+						protocol.SerializeBulkString("expired:" + key),
+					})
+					s.pubsub.Publish("keyspace", msg)
 				}
 			}
 		}
@@ -452,9 +502,9 @@ func (s *Store) startExpirationCheck() {
 	}
 }
 
-// checkMemory 检查内存使用并执行LRU淘汰
+// checkMemory 检查内存并执行LRU
 func (s *Store) checkMemory() {
-	// 粗略估计内存使用量
+	// 计算当前内存使用量
 	totalSize := 0
 	for key, value := range s.data {
 		totalSize += len(key) + len(value)
@@ -466,41 +516,50 @@ func (s *Store) checkMemory() {
 		}
 	}
 
+	// 检查是否超过最大内存限制
 	if totalSize > s.maxMemory {
-		// 按访问时间排序，删除最早的键
 		type kv struct {
 			key  string
 			time time.Time
 		}
 		var keys []kv
+		// 收集所有键的最后访问事件
 		for key, t := range s.accessTime {
 			keys = append(keys, kv{key, t})
 		}
+		// 循环淘汰直到内存使用量在限制之内
 		for len(keys) > 0 && totalSize > s.maxMemory {
-			// 找到最早访问的键
 			minTime := time.Now()
 			var minKey string
+
+			// 找到最早访问的键
 			for _, k := range keys {
+				// 比较访问时间是否早于当前最早时间
 				if k.time.Before(minTime) {
 					minTime = k.time
 					minKey = k.key
 				}
 			}
-			// 删除键
+
 			totalSize -= len(minKey)
+			// 处理字符串
 			if value, exists := s.data[minKey]; exists {
 				totalSize -= len(value)
 				delete(s.data, minKey)
 			}
+			// 处理列表
 			if list, exists := s.lists[minKey]; exists {
 				for _, value := range list {
 					totalSize -= len(value)
 				}
 				delete(s.lists, minKey)
 			}
+
+			// 清理过期时间和访问时间(相关元数据)
 			delete(s.expire, minKey)
 			delete(s.accessTime, minKey)
-			// 从keys中移除
+
+			// 从待处理列表中删除
 			for i, k := range keys {
 				if k.key == minKey {
 					keys = append(keys[:i], keys[i+1:]...)
@@ -509,4 +568,92 @@ func (s *Store) checkMemory() {
 			}
 		}
 	}
+}
+
+// LoadAOF 从AOF文件加载并重放命令
+func (s *Store) LoadAOF(filename string) error {
+    f, err := os.Open(filename)
+    if err != nil {
+        return err
+    }
+    defer f.Close()
+
+	// 逐行读取AOF文件
+    reader := bufio.NewReader(f)
+    for {
+		// 解析RESP命令
+        cmd, err := protocol.ParseRESP(reader)
+        if err != nil {
+            if err.Error() == "EOF" {
+                break
+            }
+            return fmt.Errorf("AOF parse error: %v", err)
+        }
+
+		// 执行命令
+        switch cmd.Name {
+        case "SET":
+            if len(cmd.Args) >= 2 {
+                s.data[cmd.Args[0]] = cmd.Args[1]
+                s.accessTime[cmd.Args[0]] = time.Now()
+            }
+        case "EXPIRE":
+            if len(cmd.Args) == 2 {
+                seconds, _ := strconv.Atoi(cmd.Args[1])
+                s.expire[cmd.Args[0]] = time.Now().Add(time.Duration(seconds) * time.Second)
+                s.accessTime[cmd.Args[0]] = time.Now()
+            }
+        case "DEL":
+            for _, key := range cmd.Args {
+                delete(s.data, key)
+                delete(s.lists, key)
+                delete(s.expire, key)
+                delete(s.accessTime, key)
+            }
+        case "LPUSH":
+            if len(cmd.Args) >= 2 {
+                key := cmd.Args[0]
+                values := cmd.Args[1:]
+                // 翻转 values，使左边的参数先进入列表
+                for i, j := 0, len(values)-1; i < j; i, j = i+1, j-1 {
+                    values[i], values[j] = values[j], values[i]
+                }
+                list := append(values, s.lists[key]...)
+                s.lists[key] = list
+                s.accessTime[key] = time.Now()
+            }
+        case "RPUSH":
+            if len(cmd.Args) >= 2 {
+                key := cmd.Args[0]
+                values := cmd.Args[1:]
+                s.lists[key] = append(s.lists[key], values...)
+                s.accessTime[key] = time.Now()
+            }
+        case "LPOP":
+            if len(cmd.Args) == 1 {
+                key := cmd.Args[0]
+                list := s.lists[key]
+                if len(list) > 0 {
+                    s.lists[key] = list[1:]
+                    if len(s.lists[key]) == 0 {
+                        delete(s.lists, key)
+                        delete(s.accessTime, key)
+                    }
+                }
+            }
+        case "RPOP":
+            if len(cmd.Args) == 1 {
+                key := cmd.Args[0]
+                list := s.lists[key]
+                if len(list) > 0 {
+                    s.lists[key] = list[:len(list)-1]
+                    if len(s.lists[key]) == 0 {
+                        delete(s.lists, key)
+                        delete(s.accessTime, key)
+                    }
+                }
+            }
+        }
+    }
+    return nil
 }

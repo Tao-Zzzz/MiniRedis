@@ -1,32 +1,42 @@
 package main
 
 import (
+	"context"
+	"flag"
 	"fmt"
 	"log"
 	"MiniRedis/internal/server"
 	"os"
 	"os/signal"
 	"syscall"
-	"context"
 )
 
 func main() {
-	// 创建上下文，用于优雅关闭
+	// 解析命令行参数
+	isSlave := flag.Bool("slave", false, "Run as slave server")
+	masterAddr := flag.String("master", "", "Master server address (for slave mode)")
+	flag.Parse()
+
+	// 创建上下文
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// 初始化服务器，监听在6379端口
-	srv, err := server.NewServer(":6379")
+	// 初始化服务器
+	addr := ":6379"
+	if *isSlave {
+		addr = ":6380"
+	}
+	srv, err := server.NewServer(addr, *isSlave, *masterAddr)
 	if err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 
-	// 捕获系统信号以优雅关闭
+	// 捕获系统信号
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// 启动服务器
-	fmt.Println("MiniRedis server started on :6379")
+	fmt.Printf("MiniRedis server started on %s (slave: %v)\n", addr, *isSlave)
 	go func() {
 		if err := srv.Start(ctx); err != nil {
 			log.Printf("Server stopped: %v", err)
@@ -36,7 +46,7 @@ func main() {
 	// 等待信号
 	<-sigCh
 	fmt.Println("\nShutting down server...")
-	cancel() // 触发上下文取消
-	srv.Wait() // 等待所有连接关闭
+	cancel()
+	srv.Wait()
 	fmt.Println("Server stopped gracefully")
 }
