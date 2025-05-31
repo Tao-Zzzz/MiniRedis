@@ -657,3 +657,13 @@ func (s *Store) LoadAOF(filename string) error {
     }
     return nil
 }
+
+func (s *Store) GetAllKeys() []string {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+    keys := make([]string, 0, len(s.data))
+    for k := range s.data {
+        keys = append(keys, k)
+    }
+    return keys
+}
