@@ -1,27 +1,67 @@
 # MiniRedis
 本项目为一个golang和redis的学习项目, 旨在深刻理解golang与redis的运用等
 
-涵盖TCP服务器、键值存储、RESP协议解析、AOF/RDB持久化、事务、发布/订阅、键空间通知和LRU淘汰等功能
+**涵盖TCP服务器、键值存储、RESP协议解析、AOF/RDB持久化、事务、发布/订阅、键空间通知和LRU淘汰等功能**
+## 运行截图
+### 键值存储, 事务
+![[kid/Pasted image 20250530162948.png]]
+### 订阅
+![[kid/Pasted image 20250530164251.png]]
+### 主从服务器
+![[kid/Pasted image 20250601110509.png]]
+## RedisServer 核心运行流程
+### **main 创建 NewServer**  
+main 解析 flag 参数（地址、是否从服务器、主服务器地址），调用 NewServer 初始化资源：TCP 监听器（单一端口，默认 :6379）、存储 store、发布/订阅 pubsub、命令通道 cmdCh、从服务器记录 slaves 和复制管理 replication，然后调用 Start。
+### **Start 循环接收连接**  
+<font color="#ff0000">Start 启动协程运行 eventLoop 处理命令</font>，若是**从服务器则启动协程连接主服务**器。循环调用 listener.Accept 接收客户端和从服务器连接，创建新协程调用 handleConnection 处理。
+### **handleConnection 读取和解析数据**  
+循环读取客户端发送的 RESP 协议数据，调用 protocol.ParseRESP 解析为命令。**若命令是 SLAVEOF，标记为从服务器并注册**；若命令是 SUBSCRIBE，标记为订阅者。提交命令到 cmdCh 通道。
+### **eventLoop 处理命令**  
+循环从 cmdCh 读取命令，调用 handleCommand 处理，获取响应并写入连接。若客户端是订阅者，推送 pubsub 消息。可扩展，命令异步处理。
+### **handleCommand 操作 store**  
+**根据命令名操作 store**：SET 设置键值，GET 获取值，DEL 删除键，LPUSH/RPUSH 操作列表等。主服务器转发**写命令给从服务器，返回 RESP 格式响应**。
+## 主从复制
+### **从服务器连接主服务器**  
+从服务器启动时，replication.Start 建立与主服务器的 TCP 连接（同一端口，如 :6379），**发送 SLAVEOF 命令**，接收主服务器的初始数据和后续命令。
+### **主服务器转发写操作**  
+主服务器在 handleConnection **识别 SLAVEOF，注册从服务器连接，发送所有键值对进行初始同步。**写操作（如 SET, DEL）执行后，调用 replication.SendCommand 发送命令到从服务器。
+### **从服务器拒绝写操作**  
+在 handleCommand 中，若是从服务器且命令**非读操作（如 GET, LLEN），拒绝执行**，返回错误，确保数据由主服务器同步。
+## PubSub订阅系统
+一个读写锁
+一个二级map, 一级键存储频道名, 二级键存储客户端id
+一个map存储客户端的chan
 
-## 运行流程
-main创建NewServer, 然后Start,
-Start循环中接收客户端连接, 创新新的协程handleConnection对连接进行处理
-handleConnection中读取客户端发送的数据, 并进行解析, 然后将具体的任务发送给handleCommand处理
-handleCommand对自创的store进行处理即可, 然后返回响应
+订阅时注册map, 进行配置
+**当要发送消息时, 调用Publish, publish内部将message传给频道中每一个订阅者 (客户端) 的chan(通道)中**,
 
+**如果是订阅者客户端, 那么服务器查询该频道是否有消息待推送**
+## 主从复制
+从服务器建立的时候**增加一个与主服务器的连接**, 接收主服务器的命令, 主服务器进行写操作的时候发送命令到从服务器, 让从服务器进行一样的操作
+
+而且在命令处理的地方, 如果是从无服务器则拒绝一切写操作
+
+## flag配置启动参数
+## [[chan]]实现goroutine间通信
+有缓冲则异步, 没有则阻塞
+配合select可以等待多个通道操作
+有工作队列, 广播通知, 请求响应, 流水线, 扇入扇出几种经典模式
 ## RESP协议
 [[ParseRESP]], [[redis常见操作]]
 [[go的select]]
-sync. WaitGruop通过计数的方法跟踪还有多少个协程没有处理完
-## 快照
+sync. **WaitGruop通过计数**的方法跟踪还有多少个协程没有处理完
+## AOF
+持久化,记录每个写操作
+当创建Store实例时, 会优先加载AOF, 再加载RDB
+## 快照RDB
 Store初始化的时候起一个协程, 每分钟进行一次快照
 保存快照将内存中的数据结构写入磁盘,
 - **写入（序列化）**  
-    先打开文件，然后用 [gob.NewEncoder(f)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html) 创建编码器，依次调用 [encoder.Encode(data)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)、[encoder.Encode(lists)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)、[encoder.Encode(expire)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)，把数据写入文件。  
+    先打开文件，然后用 [gob.NewEncoder(f)]创建编码器，依次调用 [encoder.Encode(data)]、[encoder.Encode(lists)]，把数据写入文件。  
     这些数据会**按顺序**写入文件（先 data，再 lists，再 expire）。
     
 - **读取（反序列化）**  
-    读取时也是先打开文件，用 [gob.NewDecoder(f)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html) 创建解码器，然后依次 [decoder.Decode(&data)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)、[decoder.Decode(&lists)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)、[decoder.Decode(&expire)](vscode-file://vscode-app/c:/Microsoft%20VS%20Code/resources/app/out/vs/code/electron-sandbox/workbench/workbench.html)。  
+    读取时也是先打开文件，用 [gob.NewDecoder(f)] 创建解码器，然后依次 [decoder.Decode(&data)]、[decoder.Decode(&lists)]、[decoder.Decode(&expire)]
     读取顺序**必须和写入顺序一致**，否则会出错。
 
 只要写和读的顺序一致, 那么久能够正确还原数据
