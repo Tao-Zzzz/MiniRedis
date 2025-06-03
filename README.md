@@ -1,5 +1,5 @@
 # MiniRedis
-本项目为一个golang和redis的学习项目, 旨在深刻理解golang与redis的运用等
+本项目为一个golang和redis的学习项目, 目的是了解go语言和探索redis的运行逻辑
 
 **涵盖TCP服务器、键值存储、RESP协议解析、AOF/RDB持久化、事务、发布/订阅、键空间通知和LRU淘汰等功能**
 ## 运行截图
