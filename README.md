@@ -4,11 +4,11 @@
 **涵盖TCP服务器、键值存储、RESP协议解析、AOF/RDB持久化、事务、发布/订阅、键空间通知和LRU淘汰等功能**
 ## 运行截图
 ### 键值存储, 事务
-![[kid/Pasted image 20250530162948.png]]
+![](attachment/4011facaeb2eab1c5a2461f0e8dbb440.png)
 ### 订阅
-![[kid/Pasted image 20250530164251.png]]
+![](attachment/92fa4dfa89ee022b66d2189fdbdd49bd.png)
 ### 主从服务器
-![[kid/Pasted image 20250601110509.png]]
+![](attachment/fd6b488470ebd04019ad943d1fb4a8b9.png)
 ## RedisServer 核心运行流程
 ### **main 创建 NewServer**  
 main 解析 flag 参数（地址、是否从服务器、主服务器地址），调用 NewServer 初始化资源：TCP 监听器（单一端口，默认 :6379）、存储 store、发布/订阅 pubsub、命令通道 cmdCh、从服务器记录 slaves 和复制管理 replication，然后调用 Start。
@@ -89,7 +89,7 @@ go的指针就是智能指针
 - Redis/MiniRedis 的事务（MULTI/EXEC）只会把“写操作”加入队列，读操作直接返回当前值。
 - 
 ### ctrl c 关闭时序图
-![[kid/Pasted image 20250529112358.png]]
+![](attachment/ada2064dfbb09ff46307768efaed5324.png)
 ## 语法
 go不需要显示解引用
 
@@ -117,4 +117,3 @@ go不需要显示解引用
 - - `Lock/Unlock`：写锁，防止并发写冲突。
 - `defer`：延迟执行，在函数返回前自动释放锁。
 - TrimSpace去空格,\r和\n, 两边的
-
